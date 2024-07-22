@@ -6,12 +6,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -562,15 +560,16 @@ func (c *config) Load(path string, fsys fs.FS) error {
 		c.Db.Pooler.ConnectionString = string(connString)
 	}
 	// Update external api url
-	apiUrl := url.URL{Host: net.JoinHostPort(c.Hostname,
-		strconv.FormatUint(uint64(c.Api.Port), 10),
-	)}
-	if c.Api.Tls.Enabled {
-		apiUrl.Scheme = "https"
-	} else {
-		apiUrl.Scheme = "http"
-	}
-	c.Api.ExternalUrl = apiUrl.String()
+	// apiUrl := url.URL{Host: net.JoinHostPort(c.Hostname,
+	// 	strconv.FormatUint(uint64(c.Api.Port), 10),
+	// )}
+	// if c.Api.Tls.Enabled {
+	// 	apiUrl.Scheme = "https"
+	// } else {
+	// 	apiUrl.Scheme = "http"
+	// }
+	// c.Api.ExternalUrl = apiUrl.String()
+	c.Api.ExternalUrl = "https://3.23.15.239.nip.io:54321"
 	// Update image versions
 	if version, err := fs.ReadFile(fsys, builder.PostgresVersionPath); err == nil {
 		if strings.HasPrefix(string(version), "15.") && semver.Compare(string(version[3:]), "1.0.55") >= 0 {
