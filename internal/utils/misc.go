@@ -301,7 +301,6 @@ func Ptr[T any](v T) *T {
 }
 
 func GetHostname() string {
-	return "3.23.15.239.nip.io"
 	host := Docker.DaemonHost()
 	if parsed, err := client.ParseHostURL(host); err == nil && parsed.Scheme == "tcp" {
 		if host, _, err := net.SplitHostPort(parsed.Host); err == nil {
