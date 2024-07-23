@@ -569,7 +569,7 @@ func (c *config) Load(path string, fsys fs.FS) error {
 	// 	apiUrl.Scheme = "http"
 	// }
 	// c.Api.ExternalUrl = apiUrl.String()
-	c.Api.ExternalUrl = "https://3.23.15.239.nip.io:54321"
+	c.Api.ExternalUrl = "https://tcdev.co:54321"
 	// Update image versions
 	if version, err := fs.ReadFile(fsys, builder.PostgresVersionPath); err == nil {
 		if strings.HasPrefix(string(version), "15.") && semver.Compare(string(version[3:]), "1.0.55") >= 0 {
