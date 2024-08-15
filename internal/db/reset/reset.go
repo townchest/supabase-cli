@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
@@ -21,6 +22,7 @@ import (
 	"github.com/supabase/cli/internal/gen/keys"
 	"github.com/supabase/cli/internal/migration/apply"
 	"github.com/supabase/cli/internal/migration/repair"
+	"github.com/supabase/cli/internal/seed/buckets"
 	"github.com/supabase/cli/internal/utils"
 	"github.com/supabase/cli/pkg/migration"
 )
@@ -43,17 +45,21 @@ func Run(ctx context.Context, version string, config pgconn.Config, fsys afero.F
 		}
 		return resetRemote(ctx, version, config, fsys, options...)
 	}
-
 	// Config file is loaded before parsing --linked or --local flags
 	if err := utils.AssertSupabaseDbIsRunning(); err != nil {
 		return err
 	}
-
 	// Reset postgres database because extensions (pg_cron, pg_net) require postgres
 	if err := resetDatabase(ctx, version, fsys, options...); err != nil {
 		return err
 	}
-
+	// Seed objects from supabase/buckets directory
+	if err := start.WaitForHealthyService(ctx, 30*time.Second, utils.StorageId); err != nil {
+		return err
+	}
+	if err := buckets.Run(ctx, "", false, fsys); err != nil {
+		return err
+	}
 	branch := keys.GetGitBranch(fsys)
 	fmt.Fprintln(os.Stderr, "Finished "+utils.Aqua("supabase db reset")+" on branch "+utils.Aqua(branch)+".")
 	return nil
@@ -199,7 +205,7 @@ func RestartDatabase(ctx context.Context, w io.Writer) error {
 
 func restartServices(ctx context.Context) error {
 	// No need to restart PostgREST because it automatically reconnects and listens for schema changes
-	services := []string{utils.StorageId, utils.GotrueId, utils.RealtimeId}
+	services := listServicesToRestart()
 	result := utils.WaitAll(services, func(id string) error {
 		if err := utils.Docker.ContainerRestart(ctx, id, container.StopOptions{}); err != nil && !errdefs.IsNotFound(err) {
 			return errors.Errorf("Failed to restart %s: %w", id, err)
@@ -208,6 +214,10 @@ func restartServices(ctx context.Context) error {
 	})
 	// Do not wait for service healthy as those services may be excluded from starting
 	return errors.Join(result...)
+}
+
+func listServicesToRestart() []string {
+	return []string{utils.StorageId, utils.GotrueId, utils.RealtimeId, utils.PoolerId}
 }
 
 func resetRemote(ctx context.Context, version string, config pgconn.Config, fsys afero.Fs, options ...func(*pgx.ConnConfig)) error {

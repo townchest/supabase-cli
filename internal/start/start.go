@@ -5,6 +5,8 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -32,7 +34,7 @@ import (
 )
 
 func suggestUpdateCmd(serviceImages map[string]string) string {
-	cmd := "You are running outdated service versions locally:\n"
+	cmd := fmt.Sprintln(utils.Yellow("WARNING:"), "You are running different service versions locally than your linked project:")
 	for k, v := range serviceImages {
 		cmd += fmt.Sprintf("%s => %s\n", k, v)
 	}
@@ -103,6 +105,7 @@ type kongConfig struct {
 	PgmetaId      string
 	EdgeRuntimeId string
 	LogflareId    string
+	PoolerId      string
 	ApiHost       string
 	ApiPort       uint16
 }
@@ -161,6 +164,11 @@ func run(p utils.Program, ctx context.Context, fsys afero.Fs, excludedContainers
 	excluded := make(map[string]bool)
 	for _, name := range excludedContainers {
 		excluded[name] = true
+	}
+
+	jwks, err := utils.Config.Auth.ResolveJWKS(ctx)
+	if err != nil {
+		return err
 	}
 
 	// Start Postgres.
@@ -275,27 +283,38 @@ EOF
 		}); err != nil {
 			return errors.Errorf("failed to exec template: %w", err)
 		}
-		var binds []string
-		env := []string{
-			"VECTOR_CONFIG=/etc/vector/vector.yaml",
-		}
+		var binds, env []string
 		// Special case for GitLab pipeline
-		host := utils.Docker.DaemonHost()
-		if parsed, err := client.ParseHostURL(host); err == nil && parsed.Scheme == "tcp" {
-			parsed.Host = "host.docker.internal"
-			env = append(env, "DOCKER_HOST="+parsed.String())
-		} else if parsed, err := client.ParseHostURL(client.DefaultDockerHost); err == nil {
-			if host != client.DefaultDockerHost {
+		parsed, err := client.ParseHostURL(utils.Docker.DaemonHost())
+		if err != nil {
+			return errors.Errorf("failed to parse docker host: %w", err)
+		}
+		// Ref: https://vector.dev/docs/reference/configuration/sources/docker_logs/#docker_host
+		dindHost := url.URL{Scheme: "http", Host: net.JoinHostPort(utils.DinDHost, "2375")}
+		switch parsed.Scheme {
+		case "tcp":
+			if _, port, err := net.SplitHostPort(parsed.Host); err == nil {
+				dindHost.Host = net.JoinHostPort(utils.DinDHost, port)
+			}
+			env = append(env, "DOCKER_HOST="+dindHost.String())
+		case "npipe":
+			fmt.Fprintln(os.Stderr, utils.Yellow("WARNING:"), "analytics requires docker daemon exposed on tcp://localhost:2375")
+			env = append(env, "DOCKER_HOST="+dindHost.String())
+		case "unix":
+			if parsed, err = client.ParseHostURL(client.DefaultDockerHost); err != nil {
+				return errors.Errorf("failed to parse default host: %w", err)
+			}
+			if utils.Docker.DaemonHost() != client.DefaultDockerHost {
 				fmt.Fprintln(os.Stderr, utils.Yellow("WARNING:"), "analytics requires mounting default docker socket:", parsed.Host)
 			}
-			binds = append(binds, parsed.Host+":/var/run/docker.sock:ro")
+			binds = append(binds, fmt.Sprintf("%[1]s:%[1]s:ro", parsed.Host))
 		}
 		if _, err := utils.DockerStart(
 			ctx,
 			container.Config{
 				Image: utils.Config.Analytics.VectorImage,
 				Env:   env,
-				Entrypoint: []string{"sh", "-c", `cat <<'EOF' > /etc/vector/vector.yaml && vector
+				Entrypoint: []string{"sh", "-c", `cat <<'EOF' > /etc/vector/vector.yaml && vector --config /etc/vector/vector.yaml
 ` + vectorConfigBuf.String() + `
 EOF
 `},
@@ -337,6 +356,7 @@ EOF
 			PgmetaId:      utils.PgmetaId,
 			EdgeRuntimeId: utils.EdgeRuntimeId,
 			LogflareId:    utils.LogflareId,
+			PoolerId:      utils.PoolerId,
 			ApiHost:       utils.Config.Hostname,
 			ApiPort:       utils.Config.Api.Port,
 		}); err != nil {
@@ -482,6 +502,11 @@ EOF
 			fmt.Sprintf("GOTRUE_SECURITY_REFRESH_TOKEN_ROTATION_ENABLED=%v", utils.Config.Auth.EnableRefreshTokenRotation),
 			fmt.Sprintf("GOTRUE_SECURITY_REFRESH_TOKEN_REUSE_INTERVAL=%v", utils.Config.Auth.RefreshTokenReuseInterval),
 			fmt.Sprintf("GOTRUE_SECURITY_MANUAL_LINKING_ENABLED=%v", utils.Config.Auth.EnableManualLinking),
+			fmt.Sprintf("GOTRUE_MFA_PHONE_ENROLL_ENABLED=%v", utils.Config.Auth.MFA.Phone.EnrollEnabled),
+			fmt.Sprintf("GOTRUE_MFA_PHONE_VERIFY_ENABLED=%v", utils.Config.Auth.MFA.Phone.VerifyEnabled),
+			fmt.Sprintf("GOTRUE_MFA_TOTP_ENROLL_ENABLED=%v", utils.Config.Auth.MFA.TOTP.EnrollEnabled),
+			fmt.Sprintf("GOTRUE_MFA_TOTP_VERIFY_ENABLED=%v", utils.Config.Auth.MFA.TOTP.VerifyEnabled),
+			fmt.Sprintf("GOTRUE_MFA_MAX_ENROLLED_FACTORS=%v", utils.Config.Auth.MFA.MaxEnrolledFactors),
 		}
 
 		if utils.Config.Auth.Sessions.Timebox > 0 {
@@ -594,6 +619,14 @@ EOF
 				"GOTRUE_HOOK_SEND_EMAIL_ENABLED=true",
 				"GOTRUE_HOOK_SEND_EMAIL_URI="+utils.Config.Auth.Hook.SendEmail.URI,
 				"GOTRUE_HOOK_SEND_EMAIL_SECRETS="+utils.Config.Auth.Hook.SendEmail.Secrets,
+			)
+		}
+		if utils.Config.Auth.MFA.Phone.EnrollEnabled || utils.Config.Auth.MFA.Phone.VerifyEnabled {
+			env = append(
+				env,
+				"GOTRUE_MFA_PHONE_TEMPLATE="+utils.Config.Auth.MFA.Phone.Template,
+				fmt.Sprintf("GOTRUE_MFA_PHONE_OTP_LENGTH=%v", utils.Config.Auth.MFA.Phone.OtpLength),
+				fmt.Sprintf("GOTRUE_MFA_PHONE_MAX_FREQUENCY=%v", utils.Config.Auth.MFA.Phone.MaxFrequency),
 			)
 		}
 
@@ -709,6 +742,7 @@ EOF
 					"DB_AFTER_CONNECT_QUERY=SET search_path TO _realtime",
 					"DB_ENC_KEY=" + utils.Config.Realtime.EncryptionKey,
 					"API_JWT_SECRET=" + utils.Config.Auth.JwtSecret,
+					fmt.Sprintf("API_JWT_JWKS=%s", jwks),
 					"METRICS_JWT_SECRET=" + utils.Config.Auth.JwtSecret,
 					"APP_NAME=realtime",
 					"SECRET_KEY_BASE=" + utils.Config.Realtime.SecretKeyBase,
@@ -759,7 +793,7 @@ EOF
 					"PGRST_DB_EXTRA_SEARCH_PATH=" + strings.Join(utils.Config.Api.ExtraSearchPath, ","),
 					fmt.Sprintf("PGRST_DB_MAX_ROWS=%d", utils.Config.Api.MaxRows),
 					"PGRST_DB_ANON_ROLE=anon",
-					"PGRST_JWT_SECRET=" + utils.Config.Auth.JwtSecret,
+					fmt.Sprintf("PGRST_JWT_SECRET=%s", jwks),
 					"PGRST_ADMIN_SERVER_PORT=3001",
 				},
 				// PostgREST does not expose a shell for health check
@@ -792,6 +826,7 @@ EOF
 					"ANON_KEY=" + utils.Config.Auth.AnonKey,
 					"SERVICE_KEY=" + utils.Config.Auth.ServiceRoleKey,
 					"AUTH_JWT_SECRET=" + utils.Config.Auth.JwtSecret,
+					fmt.Sprintf("AUTH_JWT_JWKS=%s", jwks),
 					fmt.Sprintf("DATABASE_URL=postgresql://supabase_storage_admin:%s@%s:%d/%s", dbConfig.Password, dbConfig.Host, dbConfig.Port, dbConfig.Database),
 					fmt.Sprintf("FILE_SIZE_LIMIT=%v", utils.Config.Storage.FileSizeLimit),
 					"STORAGE_BACKEND=file",
@@ -1049,7 +1084,7 @@ EOF
 			return err
 		}
 		// Disable prompts when seeding
-		if err := buckets.Run(ctx, "", nil); err != nil {
+		if err := buckets.Run(ctx, "", false, fsys); err != nil {
 			return err
 		}
 	}
