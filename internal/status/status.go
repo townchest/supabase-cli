@@ -174,7 +174,7 @@ var (
 
 func checkHTTPHead(ctx context.Context, path string) error {
 	healthOnce.Do(func() {
-		server := "http://localhost:4321"
+		server := "http://localhost:54321"
 		header := func(req *http.Request) {
 			req.Header.Add("apikey", utils.Config.Auth.AnonKey)
 		}
